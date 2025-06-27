@@ -481,7 +481,7 @@
             prompt_type: promptType
           });
 
-          const streamUrl = 'https://localhost:3458/chat';
+          const streamUrl = 'http://localhost:34783/chat';
           const shopId = window.shopId;
 
           const response = await fetch(streamUrl, {
@@ -779,7 +779,7 @@
           attemptCount++;
 
           try {
-            const tokenUrl = 'https://localhost:3458/auth/token-status?conversation_id=' +
+            const tokenUrl = 'http://localhost:34783/auth/token-status?conversation_id=' +
               encodeURIComponent(conversationId);
             const response = await fetch(tokenUrl);
 

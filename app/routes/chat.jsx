@@ -7,7 +7,7 @@ import MCPClient from "../mcp-client";
 import { saveMessage, getConversationHistory, storeCustomerAccountUrl, getCustomerAccountUrl } from "../db.server";
 import AppConfig from "../services/config.server";
 import { createSseStream } from "../services/streaming.server";
-import { createClaudeService } from "../services/claude.server";
+import { createDeepseekService } from "../services/deepseek.server";
 import { createToolService } from "../services/tool.server";
 import { unauthenticated } from "../shopify.server";
 
@@ -128,7 +128,7 @@ async function handleChatSession({
   stream
 }) {
   // Initialize services
-  const claudeService = createClaudeService();
+  const deepseekService = createDeepseekService();
   const toolService = createToolService();
 
   // Initialize MCP client
@@ -187,89 +187,72 @@ async function handleChatSession({
     let finalMessage = { role: 'user', content: userMessage };
 
     while (finalMessage.stop_reason !== "end_turn") {
-      finalMessage = await claudeService.streamConversation(
-        {
-          messages: conversationHistory,
-          promptType,
-          tools: mcpClient.tools
+      finalMessage = await deepseekService.streamChat({
+        messages: conversationHistory,
+        tools: mcpClient.tools,
+
+        onText: (delta) => {
+          stream.sendMessage({ type: 'chunk', chunk: delta });
         },
-        {
-          // Handle text chunks
-          onText: (textDelta) => {
+
+        onMessage: (message) => {
+          conversationHistory.push({
+            role: message.role,
+            content: message.content
+          });
+
+          saveMessage(conversationId, message.role, JSON.stringify(message.content))
+            .catch((error) => {
+              console.error("Error saving message to database:", error);
+            });
+
+          stream.sendMessage({ type: 'message_complete' });
+        },
+
+        onToolUse: async (toolCall) => {
+          const { name: toolName, input: toolArgs, id: toolUseId } = toolCall;
+
+          const toolUseMessage = `Calling tool: ${toolName} with arguments: ${JSON.stringify(toolArgs)}`;
+          stream.sendMessage({
+            type: 'tool_use',
+            tool_use_message: toolUseMessage
+          });
+
+          const toolUseResponse = await mcpClient.callTool(toolName, toolArgs);
+
+          if (toolUseResponse.error) {
+            await toolService.handleToolError(
+              toolUseResponse,
+              toolName,
+              toolUseId,
+              conversationHistory,
+              stream.sendMessage,
+              conversationId
+            );
+          } else {
+            await toolService.handleToolSuccess(
+              toolUseResponse,
+              toolName,
+              toolUseId,
+              conversationHistory,
+              productsToDisplay,
+              conversationId
+            );
+          }
+
+          stream.sendMessage({ type: 'new_message' });
+        },
+
+        onContentBlock: (contentBlock) => {
+          if (contentBlock.type === 'text') {
             stream.sendMessage({
-              type: 'chunk',
-              chunk: textDelta
+              type: 'content_block_complete',
+              content_block: contentBlock
             });
-          },
-
-          // Handle complete messages
-          onMessage: (message) => {
-            conversationHistory.push({
-              role: message.role,
-              content: message.content
-            });
-
-            saveMessage(conversationId, message.role, JSON.stringify(message.content))
-              .catch((error) => {
-                console.error("Error saving message to database:", error);
-              });
-
-            // Send a completion message
-            stream.sendMessage({ type: 'message_complete' });
-          },
-
-          // Handle tool use requests
-          onToolUse: async (content) => {
-            const toolName = content.name;
-            const toolArgs = content.input;
-            const toolUseId = content.id;
-
-            const toolUseMessage = `Calling tool: ${toolName} with arguments: ${JSON.stringify(toolArgs)}`;
-
-            stream.sendMessage({
-              type: 'tool_use',
-              tool_use_message: toolUseMessage
-            });
-
-            // Call the tool
-            const toolUseResponse = await mcpClient.callTool(toolName, toolArgs);
-
-            // Handle tool response based on success/error
-            if (toolUseResponse.error) {
-              await toolService.handleToolError(
-                toolUseResponse,
-                toolName,
-                toolUseId,
-                conversationHistory,
-                stream.sendMessage,
-                conversationId
-              );
-            } else {
-              await toolService.handleToolSuccess(
-                toolUseResponse,
-                toolName,
-                toolUseId,
-                conversationHistory,
-                productsToDisplay,
-                conversationId
-              );
-            }
-
-            // Signal new message to client
-            stream.sendMessage({ type: 'new_message' });
-          },
-
-          // Handle content block completion
-          onContentBlock: (contentBlock) => {
-            if (contentBlock.type === 'text') {
-              stream.sendMessage({
-                type: 'content_block_complete',
-                content_block: contentBlock
-              });
-            }
           }
         }
-      );
+      });
+
     }
 
     // Signal end of turn
